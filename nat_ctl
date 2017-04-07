@@ -1,0 +1,359 @@
+#!/bin/bash
+# nat_ctl: simplify the job of nat and port forwarding
+# https://github.com/gidcs/nat_ctl
+# nat_ctl
+
+CONF="/etc/nat_ctl"
+NAT_CONF="${CONF}/nat"
+FORWARD_CONF="${CONF}/forward"
+LOADED_FLAG="${CONF}/loaded"
+NET_DIR="/sys/class/net"
+
+if [ ! -d ${CONF} ]; then
+    mkdir ${CONF}
+fi
+if [ ! -f ${NAT_CONF} ]; then
+    touch ${NAT_CONF}
+fi
+if [ ! -f ${FORWARD_CONF} ]; then
+    touch ${FORWARD_CONF}
+fi
+
+function add_nat_info {
+    echo "nat_ctl add_nat <subnet> <out_interface>"
+}
+
+function del_nat_info {
+    echo "nat_ctl del_nat <subnet> <out_interface>"
+}
+
+function add_forward_info {
+    echo "nat_ctl add_forward <in_interface> <proto> <port> <to_port>"
+}
+
+function del_forward_info {
+    echo "nat_ctl del_forward <in_interface> <proto> <port> <to_port>"
+}
+
+function help {
+    case $1 in
+        "add_nat")
+            echo "Usage: "
+            add_nat_info
+            ;;
+        "del_nat")
+            echo "Usage: "
+            del_nat_info
+            ;;
+        "add_forward")
+            echo "Usage: "
+            add_forward_info
+            ;;
+        "del_forward")
+            echo "Usage: "
+            del_forward_info
+            ;;
+        *)
+            echo "Usage: "
+            echo "nat_ctl load"
+            echo "nat_ctl unload"
+            echo "nat_ctl reload"
+            echo "nat_ctl list"
+            echo "nat_ctl list_nat"
+            echo "nat_ctl list_forward"
+            add_nat_info
+            del_nat_info
+            add_forward_info
+            del_forward_info
+            echo " "
+            echo "Example: "
+            echo "nat_ctl add_nat 10.10.10.0/24 eth0"
+            echo "nat_ctl add_forward eth0 tcp 80 10.10.10.1:80"
+            ;;
+    esac
+    exit 1
+}
+
+function exit_echo {
+    echo $1
+    exit 1
+}
+
+function valid_interface {
+    interface=$1
+    if [ -e "${NET_DIR}/${interface}" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+function valid_ip {
+    ipaddr=$1
+    ret=`echo ${ipaddr} | awk -F'.' '$0 ~ /^([0-9]+\.)([0-9]+\.)([0-9]+\.)[0-9]+$/ && \
+            $1 <=255 && $2 <= 255 && $3 <= 255 && $4 <= 255'`
+    if [ "${ipaddr}" == "${ret}" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+function valid_netmask {
+    netmask=$1
+    ret=`echo ${netmask} | awk '$0 ~ /^([0-9]+)$/ && $0 <= 32'`
+    if [ "${netmask}" == "${ret}" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+function valid_subnet {
+    subnet=$1
+    ipaddr=`echo ${subnet} | awk -F'/' '{ print $1 }'`
+    netmask=`echo ${subnet} | awk -F'/' '{ print $2 }'`
+    if [ "`valid_ip ${ipaddr}`" == "1" ] && [ "`valid_netmask ${netmask}`" == "1" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+function valid_proto {
+    protocol=$1
+    ret=`echo ${protocol} | awk '$0 ~ /^(tcp|udp)$/'`
+    if [ "${protocol}" == "${ret}" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+function valid_port {
+    port=$1
+    ret=`echo ${port} | awk '$0 ~ /^([0-9]+)$/ && $0 >= 1 && $0 <= 65535'`
+    if [ "${port}" == "${ret}" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+function valid_to_port {
+    to_port=$1
+    ipaddr=`echo ${to_port} | awk -F':' '{ print $1 }'`
+    port=`echo ${to_port} | awk -F':' '{ print $2 }'`
+    if [ "`valid_ip ${ipaddr}`" == "1" ] && [ "`valid_port ${port}`" == "1" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+function list_nat {
+    echo "subnet out_interface"
+    echo "--------------------"
+    cat ${NAT_CONF}
+}
+
+function add_nat {
+    subnet=$1
+    out_interface=$2
+    ret=`cat ${NAT_CONF} | awk -vSN=${subnet} '{ if($1==SN) print $2 }'`
+    if [ -z "${ret}" ]; then
+        /sbin/iptables -t nat -A POSTROUTING -s ${subnet} -o ${out_interface} -j MASQUERADE
+        if [ "$?" == "0" ]; then
+            echo "${subnet} ${out_interface}" >> ${NAT_CONF}
+            echo "The entry is added."
+        else
+            help "add_nat"
+        fi
+    else
+        if [ "${ret}" == "${out_interface}" ]; then
+            echo "The entry exists."
+        else
+            echo "Conflict found."
+            echo "Existed out_interface: ${ret}."
+        fi
+    fi
+}
+
+function del_nat {
+    subnet=$1
+    out_interface=$2
+    ret=`cat ${NAT_CONF} | awk -vSN=${subnet} -vIF=${out_interface} '{ if($1==SN && $2==IF) print $2 }'`
+    if [ -z "${ret}" ]; then
+        echo "The entry does not exist."
+    else
+        /sbin/iptables -t nat -D POSTROUTING -s ${subnet} -o ${out_interface} -j MASQUERADE
+        if [ "$?" == "0" ]; then
+            grep -v "${subnet} ${out_interface}" ${NAT_CONF} > ${NAT_CONF}.bak
+            mv ${NAT_CONF}.bak ${NAT_CONF}
+            echo "The entry is deleted."
+        else
+            help "del_nat"
+        fi
+    fi
+}
+
+function list_forward {
+    echo "in_interface port to_port"
+    echo "----------------------"
+    cat ${FORWARD_CONF}
+}
+
+function add_forward {
+    in_interface=$1
+    protocol=$2
+    port=$3
+    to_port=$4
+    ret=`cat ${FORWARD_CONF} | awk -vIF=${in_interface} -vPT=${protocol} -vP=${port} '{ if($1==IF && $2==PT && $3==P) print $4 }'`
+    if [ -z "${ret}" ]; then
+        /sbin/iptables -t nat -A PREROUTING -i ${in_interface} -p ${protocol} --dport ${port} -j DNAT --to ${to_port}
+        if [ "$?" == "0" ]; then
+            echo "${in_interface} ${protocol} ${port} ${to_port}" >> ${FORWARD_CONF}
+            echo "The entry is added."
+        else
+            help "add_forward"
+        fi
+    else
+        if [ "${ret}" == "${to_port}" ]; then
+            echo "The entry exists."
+        else
+            echo "Conflict found."
+            echo "Existed to_port: ${ret}."
+        fi
+    fi
+
+    
+}
+
+function del_forward {
+    in_interface=$1
+    protocol=$2
+    port=$3
+    to_port=$4
+    ret=`cat ${FORWARD_CONF} | awk -vIF=${in_interface} -vPT=${protocol} -vP=${port} -vTP=${to_port} '{ if($1==IF && $2==PT && $3==P && $4==TP) print $4 }'`
+    if [ -z "${ret}" ]; then
+        echo "The entry does not exist."
+    else
+        /sbin/iptables -t nat -D PREROUTING -i ${in_interface} -p ${protocol} --dport ${port} -j DNAT --to ${to_port}
+        if [ "$?" == "0" ]; then
+            grep -v "${in_interface} ${protocol} ${port} ${to_port}" ${FORWARD_CONF} > ${FORWARD_CONF}.bak
+            mv ${FORWARD_CONF}.bak ${FORWARD_CONF}
+            echo "The entry is deleted."
+        else
+            help "del_forward"
+        fi
+    fi
+}
+
+function nat_load {
+    if [ -f ${LOADED_FLAG} ]; then
+        exit_echo "nat and port forwarding has already loaded."
+    fi
+    cat ${NAT_CONF} | awk '{ system("/sbin/iptables -t nat -A POSTROUTING -s "$1" -o "$2" -j MASQUERADE") }'
+    cat ${FORWARD_CONF} | awk '{ system("/sbin/iptables -t nat -A PREROUTING -i "$1" -p "$2" --dport "$3" -j DNAT --to "$4) }'
+    touch ${LOADED_FLAG}
+    echo "nat and port forwarding is loaded."
+}
+
+function nat_unload {
+    if [ "$1" != "force" ] ; then
+        if [ ! -f ${LOADED_FLAG} ]; then
+            exit_echo "nat and port forwarding has not loaded yet."
+        fi
+    fi
+    cat ${NAT_CONF} | awk '{ system("/sbin/iptables -t nat -D POSTROUTING -s "$1" -o "$2" -j MASQUERADE") }'
+    cat ${FORWARD_CONF} | awk '{ system("/sbin/iptables -t nat -D PREROUTING -i "$1" -p "$2" --dport "$3" -j DNAT --to "$4) }'
+    rm -f ${LOADED_FLAG}
+    echo "nat and port forwarding is unloaded."
+}
+
+case $1 in
+    "load")
+        nat_load
+        ;;
+    "unload")
+        nat_unload
+        ;;
+    "reload")
+        nat_unload "force"
+        nat_load
+        ;;
+    "list")
+        list_nat
+        echo " "
+        list_forward
+        ;;
+    "list_nat")
+        list_nat
+        ;;
+    "add_nat")
+        if [ $# -ne 3 ]; then
+            help "add_nat"
+        fi
+        if [ "`valid_subnet $2`" == "0" ]; then
+            exit_echo "Invalid subnet: $2"
+        fi
+        if [ "`valid_interface $3`" == "0" ]; then
+            exit_echo "Invalid out_interface: $3"
+        fi
+        add_nat $2 $3
+        ;;
+    "del_nat")
+        if [ $# -ne 3 ]; then
+            help "del_nat"
+        fi
+        if [ "`valid_subnet $2`" == "0" ]; then
+            exit_echo "Invalid subnet: $2"
+        fi
+        if [ "`valid_interface $3`" == "0" ]; then
+            exit_echo "Invalid out_interface: $3"
+        fi
+        del_nat $2 $3
+        ;;
+    "list_forward")
+        list_forward
+        ;;
+    "add_forward")
+        if [ $# -ne 5 ]; then
+            help "add_forward"
+        fi
+        if [ "`valid_interface $2`" == "0" ]; then
+            exit_echo "Invalid in_interface: $2."
+        fi
+        if [ "`valid_proto $3`" == "0" ]; then
+            exit_echo "Invalid protocol: $3."
+        fi
+        if [ "`valid_port $4`" == "0" ]; then
+            exit_echo "Invalid port: $4"
+        fi
+        if [ "`valid_to_port $5`" == "0" ]; then
+            exit_echo "Invalid to_port $5"
+        fi
+        add_forward $2 $3 $4 $5
+        ;;
+    "del_forward")
+        if [ $# -ne 5 ]; then
+            help "del_forward"
+        fi
+        if [ "`valid_interface $2`" == "0" ]; then
+            exit_echo "Invalid in_interface: $2."
+        fi
+        if [ "`valid_proto $3`" == "0" ]; then
+            exit_echo "Invalid protocol: $3."
+        fi
+        if [ "`valid_port $4`" == "0" ]; then
+            exit_echo "Invalid port: $4"
+        fi
+        if [ "`valid_to_port $5`" == "0" ]; then
+            exit_echo "Invalid to_port $5"
+        fi
+        del_forward $2 $3 $4 $5
+        ;;
+    *)
+        help
+        ;;
+esac
