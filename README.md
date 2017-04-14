@@ -1,5 +1,5 @@
 # nat_ctl
-nat_ctl is a tool designed for simplifing the job of nat and port forwarding when using iptables. This tools is designed for proxmox, it does not rely on iptables daemon for reloading the rules. Therefore, you need to add post-up and post-down manually after your network interfaces configuration in order to make the rules always loaded.
+nat_ctl is a tool designed for simplifying the job of setting nat and port forwarding when using iptables. This tools is designed for proxmox, it does not rely on iptables daemon for reloading the rules. Therefore, you need to add post-up and post-down manually after your network interfaces configuration in order to make the rules always loaded.
 
 ## Usage
 	
